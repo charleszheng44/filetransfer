@@ -34,7 +34,7 @@ go build -o ftr .
 Start a background receiver on each machine:
 
 ```bash
-ftr daemon --dropbox-dir ~/Downloads --psk secret123
+ftr join --dropbox-dir ~/Downloads --key 123456
 ```
 
 List available peers on the LAN:
@@ -48,15 +48,15 @@ ftr list
 Send a file or directory:
 
 ```bash
-ftr send --psk secret123 ./file.txt alice-mac
-ftr send --psk secret123 ./myfolder bob-linux
+ftr send --key secret123 ./file.txt alice-mac
+ftr send --key secret123 ./myfolder bob-linux
 ```
 
 ---
 
 ## Command Reference
 
-### `ftr daemon`
+### `ftr join`
 
 Start the receiver and advertise presence.
 
@@ -64,13 +64,13 @@ Flags:
 
 * `--dropbox-dir <dir>`  (default `~/Downloads`)
 * `--port <n>`           (default `48623`)
-* `--psk <key>`          (optional, require a passkey for transfers)
+* `--key <key>`          (optional, require a passkey for transfers)
 
 ### `ftr list`
 
 Show all peers discovered via mDNS.
 
-### `ftr send --psk <key> <path> <peer>`
+### `ftr send --key <key> <path> <peer>`
 
 Send a file or directory to a peer.
 
@@ -80,5 +80,5 @@ Send a file or directory to a peer.
 
 * **Discovery:** Uses mDNS/Bonjour to advertise `_ftr._tcp.local` service on LAN.
 * **Transfer:** Simple HTTP endpoint `/upload`, streams tar+gzip archive.
-* **Auth:** If `--psk` is set, sender must provide matching key (`Authorization: Bearer <psk>`).
+* **Auth:** If `--key` is set, sender must provide matching key (`Authorization: Bearer <key>`).
 * **Storage:** Files extracted into the receiver’s dropbox directory.

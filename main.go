@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"flag"
 	"fmt"
-	"log"
 	"math/big"
 	"os"
 	"os/user"
@@ -33,15 +32,17 @@ func exitWithError(code int, format string, v ...any) {
 func main() {
 	args := os.Args
 	if len(args) < 2 {
-		log.Fatal("Subcommand is not provided")
+		exitWithError(1, "Subcommand is not provided")
 	}
 
 	subCommand := args[1]
 	switch subCommand {
-	case "daemon":
-		runDaemon()
+	case "join":
+		runJoin()
 	case "list":
 		runList()
+	case "help":
+		runHelp()
 	case "send":
 		runSend(args[2:])
 	default:
@@ -80,17 +81,26 @@ func randomPassKey(n int) string {
 	return string(result)
 }
 
-func runDaemon() {
-	daemonCmd := flag.NewFlagSet("daemon", flag.ExitOnError)
-	daemonCmd.SetOutput(os.Stdout)
+func runHelp() {
+	fmt.Println(
+		"Usage:\n",
+		"    Join the network: `ftr deamon --name <name> --port <port> --dropdir <path-to-dir> --key <key>`\n",
+		"    List all peers: `ftr list `\n",
+		"    Send file to peer: `ftr send --key <key> file peer`",
+	)
+}
+
+func runJoin() {
+	joinCmd := flag.NewFlagSet("join", flag.ExitOnError)
+	joinCmd.SetOutput(os.Stdout)
 	hostName, err := os.Hostname()
 	if err != nil {
 		exitWithError(1, "Failed to get the hostname: %v", err)
 	}
-	name := trimHostNameSuffix(*daemonCmd.String("name", hostName, "the name for the host"))
-	port := daemonCmd.Int("port", defaultPort, "the port the server will listen at")
-	dropDir := daemonCmd.String("drop-dir", defaultDropDir(), "the path to the default drop dir")
-	passKey := daemonCmd.String("passkey", randomPassKey(6), "the passkey used to authn the file transfer")
+	name := trimHostNameSuffix(*joinCmd.String("name", hostName, "the name for the host"))
+	port := joinCmd.Int("port", defaultPort, "the port the server will listen at")
+	dropDir := joinCmd.String("dropdir", defaultDropDir(), "the path to the default drop dir")
+	passKey := joinCmd.String("key", randomPassKey(6), "the pre-shared key used to authn the file transfer")
 
 	// All available ip addresses will be appended to the entry automatically
 	rvrSvr, err := zeroconf.Register(
@@ -102,7 +112,7 @@ func runDaemon() {
 		exitWithError(1, "Failed to start the receiver server: %v", err)
 	}
 	defer rvrSvr.Shutdown()
-	fmt.Printf("Advertise within the network with name %s, port %d and passkey %s\n", name, *port, *passKey)
+	fmt.Printf("Advertise within the network with name %s, port %d and key %s\n", name, *port, *passKey)
 
 	//TODO(charleszheng44): start the http server receiving files
 }

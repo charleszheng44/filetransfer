@@ -1,6 +1,8 @@
 package main
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"errors"
@@ -25,7 +27,8 @@ const (
 	service                = "_ftr._tcp"
 	domain                 = "local."
 	letters                = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	passKeyHeader          = "Ftr-Passkey"
+	passKeyHeader          = "X-Ftr-Passkey"
+	fileTypeHeader         = "X-Ftr-File-Type"
 )
 
 func exitWithError(code int, format string, v ...any) {
@@ -135,6 +138,84 @@ func mkDirIfNotExist(dir string) error {
 	return nil
 }
 
+func isDirectory(header http.Header) bool {
+	if header == nil {
+		return false
+	}
+	fileType := header.Get(fileTypeHeader)
+
+	if fileType == "" {
+		return false
+	}
+
+	if fileType == "dir" {
+		return true
+	}
+
+	if fileType == "file" {
+		return false
+	}
+
+	return false
+}
+
+func unzipUntar(src string) error {
+	var dst string
+	if strings.HasSuffix(src, ".tar.gz") {
+		dst = strings.TrimSuffix(src, "tar.gz")
+	} else if strings.HasSuffix(src, ".tgz") {
+		dst = strings.TrimSuffix(src, "tgz")
+	} else {
+		return errors.New("the file is not a tarball")
+	}
+
+	file, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+
+	gr, err := gzip.NewReader(file)
+	if err != nil {
+		return err
+	}
+	defer gr.Close()
+	tr := tar.NewReader(gr)
+
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		switch header.Typeflag {
+		case tar.TypeDir:
+			dirPath := path.Join(dst, header.Name)
+			if err := os.MkdirAll(dirPath, 0755); err != nil {
+				return err
+			}
+		case tar.TypeReg:
+			filePath := path.Join(dst, header.Name)
+			if err := os.MkdirAll(path.Dir(filePath), 0755); err != nil {
+				return err
+			}
+			outFile, err := os.Create(filePath)
+			if err != nil {
+				return err
+			}
+			if _, err := io.Copy(outFile, tr); err != nil {
+				outFile.Close()
+				return err
+			}
+			outFile.Close()
+		default:
+			return fmt.Errorf("Unrecognized tar entry type: %v", header.Typeflag)
+		}
+	}
+	return nil
+}
+
 func getFileDropHandler(dropDir, passKey string) (http.HandlerFunc, error) {
 	if dropDir == "" {
 		return nil, errors.New("the drop dir is empty")
@@ -177,6 +258,15 @@ func getFileDropHandler(dropDir, passKey string) (http.HandlerFunc, error) {
 		if _, err := io.Copy(dst, file); err != nil {
 			http.Error(w, "Failed to save the file on server", http.StatusInternalServerError)
 			return
+		}
+
+		// untar if the file is a tarball of a directory
+		if isDirectory(r.Header) {
+			// untar the file
+			if err := unzipUntar(dstPath); err != nil {
+				http.Error(w, "Failed to unzip and untar the file on server", http.StatusInternalServerError)
+				return
+			}
 		}
 
 	}, nil

@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/rand"
@@ -10,10 +11,12 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"os/user"
 	"path"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -157,6 +160,87 @@ func isDirectory(header http.Header) bool {
 	}
 
 	return false
+}
+
+func zipTar(src string) (string, error) {
+	tarball := src + ".tar.gz"
+	file, err := os.Create(tarball)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	gw := gzip.NewWriter(file)
+	defer gw.Close()
+
+	tw := tar.NewWriter(gw)
+	defer tw.Close()
+
+	err = filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
+		// return on any error
+		if err != nil {
+			return err
+		}
+
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+
+		relPath, err := filepath.Rel(filepath.Dir(src), path)
+		if err != nil {
+			return err
+		}
+		// ignore the top-level directory
+		if relPath == "." {
+			return nil
+		}
+		name := filepath.ToSlash(relPath)
+		header, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return err
+		}
+		header.Name = name
+
+		// ignore the file if it's a symlink
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+
+		if d.IsDir() {
+			header.Typeflag = tar.TypeDir
+
+			// ensure the directory can be accessible on the receiver side
+			if header.Mode&0400 == 0 {
+				header.Mode |= 0100
+			}
+			if header.Mode&0040 == 0 {
+				header.Mode |= 0010
+			}
+			if header.Mode&0004 == 0 {
+				header.Mode |= 0001
+			}
+			return tw.WriteHeader(header)
+		}
+
+		// for regular files
+		header.Typeflag = tar.TypeReg
+		if err := tw.WriteHeader(header); err != nil {
+			return err
+		}
+
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+
+		if _, err := io.Copy(tw, f); err != nil {
+			return err
+		}
+		return nil
+	})
+	return tarball, err
 }
 
 func unzipUntar(src string) error {
@@ -341,6 +425,61 @@ func runList() {
 	<-ctx.Done()
 }
 
+func sendFile(src, key, addr string, port int) error {
+	fi, err := os.Stat(src)
+	if err != nil {
+		return fmt.Errorf("failed to stat the source file: %v", err)
+	}
+	if fi.IsDir() {
+		src, err = zipTar(src)
+		if err != nil {
+			return fmt.Errorf("failed to zip and tar the source directory: %v", err)
+		}
+		defer os.Remove(src)
+	}
+
+	file, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("failed to open the source file: %v", err)
+	}
+	defer file.Close()
+
+	body := &bytes.Buffer{}
+	w := multipart.NewWriter(body)
+	part, err := w.CreateFormFile("file", path.Base(src))
+	if err != nil {
+		return fmt.Errorf("failed to create form file: %v", err)
+	}
+	if _, err := io.Copy(part, file); err != nil {
+		return fmt.Errorf("failed to copy the file content to form: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		return fmt.Errorf("failed to close the multipart writer: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://%s:%d/upload", addr, port), body)
+	if err != nil {
+		return fmt.Errorf("failed to create the http request: %v", err)
+	}
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	req.Header.Set(passKeyHeader, key)
+	req.Header.Set(fileTypeHeader, "file")
+	if fi.IsDir() {
+		req.Header.Set(fileTypeHeader, "dir")
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send the http request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to send the file, server returned status: %s", resp.Status)
+	}
+	fmt.Println("File sent successfully")
+	return nil
+}
+
 func runSend(args []string) {
 	sendCmd := flag.NewFlagSet("send", flag.ExitOnError)
 	sendCmd.SetOutput(os.Stdout)
@@ -354,7 +493,8 @@ func runSend(args []string) {
 		os.Exit(1)
 	}
 
-	_, peer := pos[0], pos[1]
+	src, peer := pos[0], pos[1]
+	key := sendCmd.Lookup("psk").Value.String()
 
 	resolver, err := zeroconf.NewResolver(nil)
 	if err != nil {
@@ -364,14 +504,19 @@ func runSend(args []string) {
 	defer cancel()
 
 	entries := make(chan *zeroconf.ServiceEntry)
+	transferCompleted := make(chan struct{})
 	go func() {
 		e := <-entries
 		fmt.Printf("Found the peer %s with ip %s and port %d", e.HostName, e.AddrIPv4[0], e.Port)
-		cancel()
+		fmt.Println("Start sending the file...")
+		if err := sendFile(src, key, e.AddrIPv4[0].String(), e.Port); err != nil {
+			exitWithError(1, "Failed to send the file: %v", err)
+		}
+		close(transferCompleted)
 	}()
 
 	if err := resolver.Lookup(ctx, peer, service, domain, entries); err != nil {
 		exitWithError(1, "Failed to find the peer: %v", err)
 	}
-	<-ctx.Done()
+	<-transferCompleted
 }

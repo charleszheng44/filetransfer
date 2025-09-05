@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"mime/multipart"
 	"net/http"
@@ -26,13 +27,21 @@ import (
 const (
 	defaultPort            = 8844
 	defaultListTimeoutSecs = 3
-	defaultLookupTimeoutMs = 100
+	defaultLookupTimeoutMs = 1000
 	service                = "_ftr._tcp"
 	domain                 = "local."
 	letters                = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	passKeyHeader          = "X-Ftr-Passkey"
 	fileTypeHeader         = "X-Ftr-File-Type"
 )
+
+var debugMode bool
+
+func debugLog(format string, v ...any) {
+	if debugMode {
+		log.Printf(format, v...)
+	}
+}
 
 func exitWithError(code int, format string, v ...any) {
 	fmt.Printf(format, v...)
@@ -100,21 +109,30 @@ func runHelp() {
 	)
 }
 
-func runJoin() {
-	joinCmd := flag.NewFlagSet("join", flag.ExitOnError)
-	joinCmd.SetOutput(os.Stdout)
+func getDefaultName() string {
 	hostName, err := os.Hostname()
 	if err != nil {
 		exitWithError(1, "Failed to get the hostname: %v", err)
 	}
-	name := trimHostNameSuffix(*joinCmd.String("name", hostName, "the name for the host"))
+	return trimHostNameSuffix(hostName)
+}
+
+func runJoin() {
+	joinCmd := flag.NewFlagSet("join", flag.ExitOnError)
+	joinCmd.SetOutput(os.Stdout)
+	name := joinCmd.String("name", getDefaultName(), "the name for the host")
+	debug := joinCmd.Bool("debug", false, "enable debug log")
 	port := joinCmd.Int("port", defaultPort, "the port the server will listen at")
 	dropDir := joinCmd.String("dropdir", defaultDropDir(), "the path to the default drop dir")
 	passKey := joinCmd.String("key", randomPassKey(6), "the pre-shared key used to authn the file transfer")
+	if err := joinCmd.Parse(os.Args[2:]); err != nil {
+		exitWithError(1, "Join command failed: %v", err)
+	}
 
+	debugMode = *debug
 	// All available ip addresses will be appended to the entry automatically
 	rvrSvr, err := zeroconf.Register(
-		name, service, domain, *port,
+		*name, service, domain, *port,
 		// the meta info used as the TXT record
 		[]string{*dropDir}, nil,
 	)
@@ -122,7 +140,7 @@ func runJoin() {
 		exitWithError(1, "Failed to start the receiver server: %v", err)
 	}
 	defer rvrSvr.Shutdown()
-	fmt.Printf("Advertise within the network with name %s, port %d and key %s\n", name, *port, *passKey)
+	fmt.Printf("Advertise within the network with name %s, port %d and key %s\n", *name, *port, *passKey)
 	errChan := make(chan error)
 	go startReceiverServer(*port, *dropDir, *passKey, errChan)
 	if err := <-errChan; err != nil {
@@ -138,6 +156,7 @@ func mkDirIfNotExist(dir string) error {
 		}
 		return err
 	}
+	debugLog("The directory %s already exists", dir)
 	return nil
 }
 
@@ -187,15 +206,17 @@ func zipTar(src string) (string, error) {
 			return err
 		}
 
-		relPath, err := filepath.Rel(filepath.Dir(src), path)
+		relPath, err := filepath.Rel(src, path)
 		if err != nil {
 			return err
 		}
 		// ignore the top-level directory
 		if relPath == "." {
+			debugLog("Ignoring the top-level directory %s", path)
 			return nil
 		}
 		name := filepath.ToSlash(relPath)
+		// create tar header for current entry
 		header, err := tar.FileInfoHeader(info, "")
 		if err != nil {
 			return err
@@ -208,6 +229,7 @@ func zipTar(src string) (string, error) {
 		}
 
 		if d.IsDir() {
+			debugLog("Adding directory %s to the tarball", path)
 			header.Typeflag = tar.TypeDir
 
 			// ensure the directory can be accessible on the receiver side
@@ -224,6 +246,7 @@ func zipTar(src string) (string, error) {
 		}
 
 		// for regular files
+		debugLog("Adding file %s to the tarball", path)
 		header.Typeflag = tar.TypeReg
 		if err := tw.WriteHeader(header); err != nil {
 			return err
@@ -238,6 +261,7 @@ func zipTar(src string) (string, error) {
 		if _, err := io.Copy(tw, f); err != nil {
 			return err
 		}
+		debugLog("Added file %s to the tarball successfully", path)
 		return nil
 	})
 	return tarball, err
@@ -246,9 +270,9 @@ func zipTar(src string) (string, error) {
 func unzipUntar(src string) error {
 	var dst string
 	if strings.HasSuffix(src, ".tar.gz") {
-		dst = strings.TrimSuffix(src, "tar.gz")
+		dst = strings.TrimSuffix(src, ".tar.gz")
 	} else if strings.HasSuffix(src, ".tgz") {
-		dst = strings.TrimSuffix(src, "tgz")
+		dst = strings.TrimSuffix(src, ".tgz")
 	} else {
 		return errors.New("the file is not a tarball")
 	}
@@ -275,12 +299,14 @@ func unzipUntar(src string) error {
 		}
 		switch header.Typeflag {
 		case tar.TypeDir:
-			dirPath := path.Join(dst, header.Name)
+			debugLog("Creating directory %s for the tar entry", header.Name)
+			dirPath := filepath.Join(dst, header.Name)
 			if err := os.MkdirAll(dirPath, 0755); err != nil {
 				return err
 			}
 		case tar.TypeReg:
-			filePath := path.Join(dst, header.Name)
+			debugLog("Creating file %s for the tar entry", header.Name)
+			filePath := filepath.Join(dst, header.Name)
 			if err := os.MkdirAll(path.Dir(filePath), 0755); err != nil {
 				return err
 			}
@@ -300,14 +326,7 @@ func unzipUntar(src string) error {
 	return nil
 }
 
-func getFileDropHandler(dropDir, passKey string) (http.HandlerFunc, error) {
-	if dropDir == "" {
-		return nil, errors.New("the drop dir is empty")
-	}
-	if passKey == "" {
-		return nil, errors.New("the passkey is empty")
-	}
-
+func getFileDropHandler(dropDir string) (http.HandlerFunc, error) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -319,14 +338,15 @@ func getFileDropHandler(dropDir, passKey string) (http.HandlerFunc, error) {
 			http.Error(w, "Failed to get the file from form", http.StatusBadRequest)
 			return
 		}
-		fileName := path.Base(header.Filename)
+		debugLog("Receiving file %s", header.Filename)
+		fileName := filepath.Base(header.Filename)
 		if fileName == "" || fileName == "." || fileName == ".." {
 			http.Error(w, "Invalid file name", http.StatusBadRequest)
 			return
 		}
 		defer file.Close()
 
-		dstPath := path.Join(dropDir, fileName)
+		dstPath := filepath.Join(dropDir, fileName)
 		if _, err := os.Stat(dstPath); err == nil {
 			http.Error(w, "File already exists", http.StatusConflict)
 			return
@@ -337,20 +357,29 @@ func getFileDropHandler(dropDir, passKey string) (http.HandlerFunc, error) {
 			http.Error(w, "Failed to create the file on server", http.StatusInternalServerError)
 			return
 		}
+		debugLog("Saving the file to %s", dstPath)
 		defer dst.Close()
 
-		if _, err := io.Copy(dst, file); err != nil {
+		written, err := io.Copy(dst, file)
+		if err != nil {
 			http.Error(w, "Failed to save the file on server", http.StatusInternalServerError)
 			return
 		}
+		debugLog("Saved %d bytes to %s", written, dstPath)
 
 		// untar if the file is a tarball of a directory
 		if isDirectory(r.Header) {
+			debugLog("The received file is a directory, unzipping and untarring it")
 			// untar the file
 			if err := unzipUntar(dstPath); err != nil {
 				http.Error(w, "Failed to unzip and untar the file on server", http.StatusInternalServerError)
 				return
 			}
+			if err := os.Remove(dstPath); err != nil {
+				http.Error(w, "Failed to remove the tarball file on server", http.StatusInternalServerError)
+				return
+			}
+			debugLog("Unzipped and untarred the file %s successfully", dstPath)
 		}
 
 	}, nil
@@ -371,11 +400,14 @@ func authMiddleware(passKey string, next http.Handler) (http.Handler, error) {
 }
 
 func startReceiverServer(port int, dropDir, passKey string, errChan chan<- error) {
+	debugLog("Starting the receiver server at port %d, drop dir %s and passkey %s", port, dropDir, passKey)
 	if err := mkDirIfNotExist(dropDir); err != nil {
 		errChan <- fmt.Errorf("failed to create the drop dir %s: %v", dropDir, err)
 		return
 	}
-	handler, err := getFileDropHandler(dropDir, passKey)
+	debugLog("The drop dir %s is ready", dropDir)
+
+	handler, err := getFileDropHandler(dropDir)
 	if err != nil {
 		errChan <- fmt.Errorf("failed to get the file drop handler: %v", err)
 		return
@@ -388,7 +420,10 @@ func startReceiverServer(port int, dropDir, passKey string, errChan chan<- error
 	}
 
 	// Start the HTTP server at all interfaces with the specified port
-	if err := http.ListenAndServe(fmt.Sprintf("0.0.0.0:%d", port), handlerWithAuth); err != nil {
+	if err := http.ListenAndServe(
+		fmt.Sprintf("0.0.0.0:%d", port),
+		handlerWithAuth,
+	); err != nil {
 		errChan <- fmt.Errorf("failed to start the http server: %v", err)
 		return
 	}
@@ -409,12 +444,12 @@ func runList() {
 	go func() {
 		fmt.Printf(
 			"%-20s %-15s %-5s %-20s\n",
-			"HostName", "IPv4", "Port", "DropDir",
+			"Instance", "IPv4", "Port", "DropDir",
 		)
 		for e := range entries {
 			fmt.Printf(
 				"%-20s %-15s %-5d %-20s\n",
-				e.HostName, e.AddrIPv4[0], e.Port, e.Text[0],
+				e.Instance, e.AddrIPv4[0], e.Port, e.Text[0],
 			)
 		}
 	}()
@@ -431,6 +466,7 @@ func sendFile(src, key, addr string, port int) error {
 		return fmt.Errorf("failed to stat the source file: %v", err)
 	}
 	if fi.IsDir() {
+		debugLog("The source %s is a directory, zipping and tarring it", src)
 		src, err = zipTar(src)
 		if err != nil {
 			return fmt.Errorf("failed to zip and tar the source directory: %v", err)
@@ -483,18 +519,20 @@ func sendFile(src, key, addr string, port int) error {
 func runSend(args []string) {
 	sendCmd := flag.NewFlagSet("send", flag.ExitOnError)
 	sendCmd.SetOutput(os.Stdout)
-	_ = sendCmd.String("psk", "", "pre-shared passkey")
+	key := sendCmd.String("key", "", "pre-shared passkey")
+	debug := sendCmd.Bool("debug", false, "enable debug log")
 	if err := sendCmd.Parse(args); err != nil {
 		exitWithError(1, "Send command failed: %v", err)
 	}
+	debugMode = *debug
 	pos := sendCmd.Args()
 	if len(pos) != 2 {
-		fmt.Println("Usage: ftr send --psk <key> <path> <peer>")
+		fmt.Println("Usage: ftr send --key <key> <path> <peer>")
 		os.Exit(1)
 	}
 
 	src, peer := pos[0], pos[1]
-	key := sendCmd.Lookup("psk").Value.String()
+	debugLog("Sending file %s to peer %s with key %s", src, peer, *key)
 
 	resolver, err := zeroconf.NewResolver(nil)
 	if err != nil {
@@ -504,19 +542,26 @@ func runSend(args []string) {
 	defer cancel()
 
 	entries := make(chan *zeroconf.ServiceEntry)
-	transferCompleted := make(chan struct{})
 	go func() {
-		e := <-entries
-		fmt.Printf("Found the peer %s with ip %s and port %d", e.HostName, e.AddrIPv4[0], e.Port)
-		fmt.Println("Start sending the file...")
-		if err := sendFile(src, key, e.AddrIPv4[0].String(), e.Port); err != nil {
-			exitWithError(1, "Failed to send the file: %v", err)
+		if err := resolver.Browse(ctx, service, domain, entries); err != nil {
+			exitWithError(1, "Failed to find the peer: %v", err)
 		}
-		close(transferCompleted)
 	}()
 
-	if err := resolver.Lookup(ctx, peer, service, domain, entries); err != nil {
-		exitWithError(1, "Failed to find the peer: %v", err)
+	for {
+		select {
+		case <-ctx.Done():
+			exitWithError(1, "Failed to find the peer %s in %dms", peer, defaultLookupTimeoutMs)
+		case e := <-entries:
+			if e.Instance != peer {
+				continue
+			}
+			fmt.Printf("Found the peer %s with ip %s and port %d\n", e.HostName, e.AddrIPv4[0], e.Port)
+			fmt.Println("Start sending the file...")
+			if err := sendFile(src, *key, e.AddrIPv4[0].String(), e.Port); err != nil {
+				exitWithError(1, "Failed to send the file: %v", err)
+			}
+			return
+		}
 	}
-	<-transferCompleted
 }

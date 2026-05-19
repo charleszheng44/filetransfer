@@ -41,8 +41,9 @@ List available peers on the LAN:
 
 ```bash
 ftr list
-# alice-mac   192.168.1.12  port=8844  dropbox=/Users/alice/Downloads
-# bob-linux   192.168.1.23  port=8844  dropbox=/home/bob/Downloads
+# Instance             IPv4            Port  DropDir
+# alice-mac            192.168.1.12    8844  /Users/alice/Downloads
+# bob-linux            192.168.1.23    8844  /home/bob/Downloads
 ```
 
 Send a file or directory:

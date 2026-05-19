@@ -11,8 +11,8 @@ It discovers peers automatically on the same Wi-Fi/Ethernet network (via mDNS/Bo
 - 🌐 Zero-config peer discovery (mDNS/Bonjour)
 - 📂 Send files or whole directories
 - 📥 Receivers store files into `~/Downloads` by default
-- ⚙️ Override receive directory with `--dropbox-dir`
-- 🔑 Optional pre-shared key (`--psk`) for simple authentication
+- ⚙️ Override receive directory with `--dropdir`
+- 🔑 Optional pre-shared key (`--key`) for simple authentication
 - 🐧 Cross-platform: Linux & macOS (Windows support planned)
 
 ---
@@ -34,15 +34,16 @@ go build -o ftr .
 Start a background receiver on each machine:
 
 ```bash
-ftr join --dropbox-dir ~/Downloads --key 123456
+ftr join --dropdir ~/Downloads --key 123456
 ```
 
 List available peers on the LAN:
 
 ```bash
 ftr list
-# alice-mac   192.168.1.12  port=48623  dropbox=/Users/alice/Downloads
-# bob-linux   192.168.1.23  port=48623  dropbox=/home/bob/Downloads
+# Instance             IPv4            Port  DropDir
+# alice-mac            192.168.1.12    8844  /Users/alice/Downloads
+# bob-linux            192.168.1.23    8844  /home/bob/Downloads
 ```
 
 Send a file or directory:
@@ -62,8 +63,8 @@ Start the receiver and advertise presence.
 
 Flags:
 
-* `--dropbox-dir <dir>`  (default `~/Downloads`)
-* `--port <n>`           (default `48623`)
+* `--dropdir <dir>`  (default `~/Downloads`)
+* `--port <n>`           (default `8844`)
 * `--key <key>`          (optional, require a passkey for transfers)
 
 ### `ftr list`
@@ -80,5 +81,5 @@ Send a file or directory to a peer.
 
 * **Discovery:** Uses mDNS/Bonjour to advertise `_ftr._tcp.local` service on LAN.
 * **Transfer:** Simple HTTP endpoint `/upload`, streams tar+gzip archive.
-* **Auth:** If `--key` is set, sender must provide matching key (`Authorization: Bearer <key>`).
+* **Auth:** If `--key` is set, sender must provide matching key (`X-Ftr-Passkey: <key>`).
 * **Storage:** Files extracted into the receiver’s dropbox directory.

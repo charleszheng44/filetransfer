@@ -63,7 +63,7 @@ Start the receiver and advertise presence.
 Flags:
 
 * `--dropdir <dir>`  (default `~/Downloads`)
-* `--port <n>`           (default `48623`)
+* `--port <n>`           (default `8844`)
 * `--key <key>`          (optional, require a passkey for transfers)
 
 ### `ftr list`
